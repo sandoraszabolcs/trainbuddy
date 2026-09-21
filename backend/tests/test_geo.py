@@ -8,8 +8,8 @@ from app.geo.clustering import cluster_home_bases, haversine_km
 from app.geo.scoring import (
     distance_score,
     habit_score,
-    pace_score,
     pace_s_per_km,
+    pace_score,
     proximity_score,
     score_candidate,
 )
@@ -18,7 +18,9 @@ BUDA = (47.4979, 19.0402)
 DEBRECEN = (47.5316, 21.6273)
 
 
-def _scatter(center: tuple[float, float], n: int, spread_deg: float = 0.004) -> list[tuple[float, float]]:
+def _scatter(
+    center: tuple[float, float], n: int, spread_deg: float = 0.004
+) -> list[tuple[float, float]]:
     """n points in a tight blob around center (roughly a few hundred metres)."""
     return [(center[0] + (i % 5) * spread_deg, center[1] + (i % 3) * spread_deg) for i in range(n)]
 
