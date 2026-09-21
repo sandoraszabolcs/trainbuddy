@@ -8,7 +8,7 @@ import logging
 from collections import defaultdict
 
 from geoalchemy2 import Geography, Geometry
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.geo.scoring import score_candidate
@@ -31,36 +31,53 @@ async def find_candidates(
     )
     distance_m = func.ST_Distance(HomeBase.point, centre)
 
-    # One row per athlete: their closest home base to the search centre.
-    stmt = (
+    # Pick each athlete's *nearest* eligible home base, one row per athlete.
+    #
+    # An athlete deliberately has up to 3 home bases (see D3), so a plain
+    # WHERE ST_DWithin join yields one row per matching base. Grouping by
+    # (athlete, base) does not collapse them either - it just makes the group key
+    # the pair. DISTINCT ON (athlete.id) with ORDER BY athlete.id, distance keeps
+    # the closest base and discards the rest.
+    nearest_base = (
         select(
-            Athlete,
-            func.min(distance_m).label("distance_m"),
+            Athlete.id.label("athlete_id"),
+            distance_m.label("distance_m"),
             func.ST_Y(func.ST_AsText(HomeBase.point).cast(Geometry)).label("base_lat"),
             func.ST_X(func.ST_AsText(HomeBase.point).cast(Geometry)).label("base_lng"),
         )
         .join(HomeBase, HomeBase.athlete_id == Athlete.id)
         .where(func.ST_DWithin(HomeBase.point, centre, filters.radius_km * 1000))
         .where(Athlete.primary_sport == filters.sport)
-        .group_by(Athlete.id, HomeBase.point)
-        .order_by(func.min(distance_m))
-        .limit(filters.limit * 5)  # over-fetch: ranking may reorder substantially
+        .distinct(Athlete.id)
+        .order_by(Athlete.id, distance_m)
     )
     if filters.sex:
-        stmt = stmt.where(Athlete.sex == filters.sex)
+        nearest_base = nearest_base.where(Athlete.sex == filters.sex)
     if exclude_athlete_id is not None:
-        stmt = stmt.where(Athlete.id != exclude_athlete_id)
+        nearest_base = nearest_base.where(Athlete.id != exclude_athlete_id)
     if filters.pace_s_per_km:
         low = filters.pace_s_per_km - filters.pace_tolerance_s
         high = filters.pace_s_per_km + filters.pace_tolerance_s
-        stmt = stmt.where(Athlete.pace_s_per_km.between(low, high))
+        # An unknown pace must not exclude anyone: pace_score() treats None as
+        # neutral, and `between` is NULL (so falsy) for a NULL column, which
+        # would quietly hide every athlete whose history yields no pace.
+        nearest_base = nearest_base.where(
+            or_(Athlete.pace_s_per_km.is_(None), Athlete.pace_s_per_km.between(low, high))
+        )
+
+    base = nearest_base.subquery()
+    stmt = (
+        select(Athlete, base.c.distance_m, base.c.base_lat, base.c.base_lng)
+        .join(base, base.c.athlete_id == Athlete.id)
+        .order_by(base.c.distance_m)
+        .limit(filters.limit * 5)  # over-fetch: ranking may reorder substantially
+    )
 
     rows = (await session.execute(stmt)).all()
     if not rows:
         return []
 
-    athletes = {row[0].id: row for row in rows}
-    habits = await _habit_history(session, list(athletes))
+    habits = await _habit_history(session, [athlete.id for athlete, *_ in rows])
 
     results: list[MatchResult] = []
     for athlete, distance_m_value, base_lat, base_lng in rows:
