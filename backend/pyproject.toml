@@ -32,6 +32,11 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "testcontainers[postgres]>=4.8",
+    # `uv venv` ships no pip, and PyCharm's package manager and bundled pytest
+    # runner both need it. The runner also imports pkg_resources, which
+    # setuptools dropped in 81 - hence the ceiling. Neither is used at runtime.
+    "pip",
+    "setuptools<81",
 ]
 
 [tool.ruff]
